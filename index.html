@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>我的日記 - 安全歸檔版</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+    :root { --primary-color: #e8784a; --bg-color: #fdf6f0; }
+    *{ margin:0; padding:0; box-sizing:border-box; font-family:-apple-system,'Noto Sans TC',system-ui; }
+    body{ background: var(--bg-color); height:100vh; overflow:hidden; }
+    #app{ max-width:480px; margin:0 auto; height:100vh; display:flex; flex-direction:column; }
+    .btn-main{ width:100%; border:none; background: var(--primary-color); color:white; padding:15px; border-radius:18px; font-size:16px; font-weight:700; cursor:pointer; }
+    .home-header{ background:linear-gradient(135deg, var(--primary-color), #c44a1e); color:white; padding:30px 20px; text-align:center; }
+    .ocr-import-btn{ margin-top:18px; width:100%; border:none; background:white; color:#c44a1e; border-radius:20px; padding:16px; font-size:17px; font-weight:800; cursor:pointer; box-shadow:0 4px 15px rgba(0,0,0,0.1); }
+    #mainApp{ display:flex; flex-direction:column; flex:1; }
+    .calendar-wrap{ flex:1; padding:20px; overflow-y:auto; }
+    .cal-grid{ display:grid; grid-template-columns:repeat(7,1fr); gap:5px; background:white; padding:15px; border-radius:20px; }
+    .cal-day{ aspect-ratio:1; display:flex; align-items:center; justify-content:center; background:#f9f9f9; border-radius:10px; font-size:14px; cursor:pointer; position:relative; }
+    .has-entry::after{ content:''; position:absolute; bottom:4px; width:4px; height:4px; background:var(--primary-color); border-radius:50%; }
+    
+    /* 確認視窗樣式 */
+    .modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.7); display:none; align-items:center; justify-content:center; z-index:2000; padding:20px; }
+    .confirm-box { background:white; width:100%; border-radius:24px; padding:24px; max-width:400px; }
+    .confirm-box h3 { margin-bottom:15px; color:#333; }
+    .confirm-box input { width:100%; padding:12px; margin:10px 0; border:1px solid #ddd; border-radius:10px; font-size:16px; }
+
+    #editorPage{ display:none; position:fixed; inset:0; background:white; z-index:100; flex-direction:column; }
+    #diaryEditor{ flex:1; padding:20px; outline:none; font-size:18px; line-height:1.6; overflow-y:auto; white-space: pre-wrap; }
+    #ocrLoading{ position:fixed; inset:0; background:rgba(0,0,0,0.85); color:white; display:none; flex-direction:column; align-items:center; justify-content:center; z-index:3000; }
+</style>
+</head>
+<body>
+
+<div id="app">
+    <div id="mainApp">
+        <div class="home-header">
+            <h1>我的日記</h1>
+            <button class="ocr-import-btn" onclick="document.getElementById('cameraInput').click()">📸 拍照匯入舊日記</button>
+        </div>
+        <div style="text-align:center; padding:15px; font-weight:bold; font-size:20px;">
+            <span id="viewYear">2026</span>年 <span id="viewMonth">5</span>月
+        </div>
+        <div class="calendar-wrap"><div id="calGrid" class="cal-grid"></div></div>
+    </div>
+
+    <div id="editorPage">
+        <div style="padding:15px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #eee;">
+            <button onclick="closeEditor()" style="background:none; border:none; font-size:24px; color:var(--primary-color);">✕</button>
+            <b id="editingDateTitle"></b>
+            <button onclick="saveEntry()" style="color:white; background:var(--primary-color); padding:8px 20px; border-radius:12px; border:none; font-weight:bold;">儲存</button>
+        </div>
+        <div id="diaryEditor" contenteditable="true"></div>
+    </div>
+
+    <div id="dateConfirmModal" class="modal-overlay">
+        <div class="confirm-box">
+            <h3>📅 確認日記日期</h3>
+            <p>AI 偵測到的日期如下，請確認：</p>
+            <input type="date" id="ocrDetectedDate">
+            <p style="font-size:13px; color:#666; margin-top:10px;">如果日期不對，請手動點擊上方修改。</p>
+            <div style="display:flex; gap:10px; margin-top:20px;">
+                <button class="btn-main" style="background:#eee; color:#333;" onclick="hideModal()">取消</button>
+                <button class="btn-main" onclick="finalizeOCR()">正確，進入編輯</button>
+            </div>
+        </div>
+    </div>
+
+    <input type="file" id="cameraInput" accept="image/*" style="display:none" onchange="handleOCR(this)">
+    <div id="ocrLoading">🔎 AI 正在精準讀取日期與內容...</div>
+</div>
+
+<script>
+const SUPABASE_URL = "https://rsuguwhgzyyvhlehpqqu.supabase.co";
+const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJzdWd1d2hnenl5dmhsZWhwcXF1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc5ODU4NDUsImV4cCI6MjA5MzU2MTg0NX0.SX9ixJYye0GNdKvcJ5c3FZAeN9s1B_oX7XnU8xwbkR8";
+const GOOGLE_KEY = "在此貼上你的API_KEY"; 
+
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
+let currentUser = null, entries = {}, currentYear = 2026, currentMonth = 5, tempOCRText = "";
+
+async function boot(){
+    const { data:{ user } } = await sb.auth.getUser();
+    if(user) { currentUser = user; await loadEntries(); renderCalendar(); }
+}
+window.onload = boot;
+
+async function loadEntries(){
+    const { data } = await sb.from('diary_entries').select('date, content_html').eq('user_id', currentUser.id);
+    entries = {}; (data || []).forEach(e => { entries[e.date] = e; });
+}
+
+function renderCalendar(){
+    document.getElementById('viewYear').innerText = currentYear;
+    document.getElementById('viewMonth').innerText = currentMonth;
+    const grid = document.getElementById('calGrid');
+    grid.innerHTML = '';
+    let total = new Date(currentYear, currentMonth, 0).getDate();
+    for(let d=1; d<=total; d++){
+        let key = `${currentYear}-${String(currentMonth).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+        grid.innerHTML += `<div class="cal-day ${entries[key]?'has-entry':''}" onclick="openEditor('${key}')">${d}</div>`;
+    }
+}
+
+// --- OCR 邏輯 (安全加強) ---
+async function handleOCR(input){
+    if(!input.files[0]) return;
+    document.getElementById('ocrLoading').style.display = 'flex';
+    let reader = new FileReader();
+    reader.onload = async (e) => {
+        const base64 = e.target.result.split(',')[1];
+        try {
+            const res = await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${GOOGLE_KEY}`, {
+                method: 'POST',
+                body: JSON.stringify({ requests: [{ image: { content: base64 }, features: [{ type: 'TEXT_DETECTION' }] }] })
+            });
+            const data = await res.json();
+            const fullText = data.responses?.[0]?.fullTextAnnotation?.text || "";
+            if(!fullText) throw new Error("辨識不到文字");
+
+            tempOCRText = fullText;
+            const detectedDate = findSmartDate(fullText);
+            
+            // 填入偵測到的日期（若無則空白），讓使用者確認
+            document.getElementById('ocrDetectedDate').value = detectedDate || "";
+            document.getElementById('ocrLoading').style.display = 'none';
+            document.getElementById('dateConfirmModal').style.display = 'flex';
+        } catch(err) { alert(err.message); document.getElementById('ocrLoading').style.display = 'none'; }
+    };
+    reader.readAsDataURL(input.files[0]);
+}
+
+function findSmartDate(text) {
+    const clean = text.replace(/\s+/g, '');
+    const ch = {"一":1,"二":2,"三":3,"四":4,"五":5,"六":6,"七":7,"八":8,"九":9,"十":10,"十一":11,"十二":12};
+    const chD = {"一":1,"二":2,"三":3,"四":4,"五":5,"六":6,"七":7,"八":8,"九":9,"十":10,"十一":11,"十二":12,"十三":13,"十四":14,"十五":15,"十六":16,"十七":17,"十八":18,"十九":19,"二十":20,"二十一":21,"二十二":22,"二十三":23,"二十四":24,"二十五":25,"二十六":26,"二十七":27,"二十八":28,"二十九":29,"三十":30,"三十一":31};
+
+    // 匹配「西元1987年一月一日」或「1987年10月10日」
+    let m = clean.match(/(\d{4})年([一二三四五六七八九十]{1,2})月([一二三四五六七八九十]{1,3})日/);
+    if(m) return `${m[1]}-${String(ch[m[2]]).padStart(2,'0')}-${String(chD[m[3]]||1).padStart(2,'0')}`;
+    
+    // 匹配「1987.1.1」或「1987-01-01」
+    let m2 = clean.match(/(\d{4})[\/\.\-](\d{1,2})[\/\.\-](\d{1,2})/);
+    if(m2) return `${m2[1]}-${String(m2[2]).padStart(2,'0')}-${String(m2[3]).padStart(2,'0')}`;
+    
+    return null; // 找不到不強行預設
+}
+
+function finalizeOCR(){
+    const date = document.getElementById('ocrDetectedDate').value;
+    if(!date) return alert("請先選擇或確認日期！");
+
+    // 檢查是否會覆蓋
+    if(entries[date] && entries[date].content_html.trim() !== ""){
+        if(!confirm("⚠️ 該日期已有日記內容！\n\n按「確定」將把新內容『附加』在舊內容後面，不會覆蓋。")) return;
+        openEditor(date, entries[date].content_html + "<br><br>--- OCR 匯入 ---<br>" + tempOCRText.replace(/\n/g, '<br>'));
+    } else {
+        openEditor(date, tempOCRText.replace(/\n/g, '<br>'));
+    }
+    hideModal();
+}
+
+function hideModal(){ document.getElementById('dateConfirmModal').style.display = 'none'; }
+
+function openEditor(date, content = null){
+    editingDate = date;
+    document.getElementById('editingDateTitle').innerText = date;
+    document.getElementById('diaryEditor').innerHTML = content || entries[date]?.content_html || '';
+    document.getElementById('mainApp').style.display = 'none';
+    document.getElementById('editorPage').style.display = 'flex';
+}
+function closeEditor(){ document.getElementById('editorPage').style.display = 'none'; document.getElementById('mainApp').style.display = 'flex'; renderCalendar(); }
+async function saveEntry(){
+    const h = document.getElementById('diaryEditor').innerHTML;
+    await sb.from('diary_entries').upsert({ user_id: currentUser.id, date: editingDate, content_html: h });
+    await loadEntries(); alert('已儲存'); closeEditor();
+}
+</script>
+</body>
+</html>
